@@ -3,48 +3,51 @@
 <head>
     <meta charset="UTF-8">
     <title>Fracture Detection</title>
-    <style>
-        body { font-family: Arial; text-align: center; margin-top: 50px; }
-        img { margin-top: 20px; max-width: 400px; }
-        .info { margin-top: 10px; font-size: 18px; font-weight: bold; }
-    </style>
 </head>
 <body>
-    <h1>Upload X-ray Image</h1>
-    <input type="file" id="fileInput" accept="image/*">
-    <button onclick="uploadImage()">Upload & Predict</button>
+    <h1>Fracture Detection</h1>
+
+    <input type="file" id="image_input" accept="image/*">
+    <button onclick="uploadImage()">Upload & Detect</button>
 
     <div>
-        <img id="resultImg" src="" alt="">
-        <div class="info" id="predictionText"></div>
+        <img id="result_image" src="" alt="Result Image">
+        <div id="prediction"></div>
+        <div id="confidence"></div>
     </div>
 
     <script>
         async function uploadImage() {
-            const fileInput = document.getElementById("fileInput");
-            if (fileInput.files.length === 0) {
-                alert("Please select an image!");
+            const fileInput = document.getElementById('image_input');
+            if (!fileInput.files[0]) {
+                alert("Please select an image first!");
                 return;
             }
 
-            const file = fileInput.files[0];
             const formData = new FormData();
-            formData.append("file", file);
+            formData.append("file", fileInput.files[0]);
 
-            const response = await fetch("/predict", {
-                method: "POST",
-                body: formData
-            });
+            try {
+                const response = await fetch("/predict", {
+                    method: "POST",
+                    body: formData
+                });
 
-            if (!response.ok) {
+                const data = await response.json();
+
+                if (data.error) {
+                    alert("Error: " + data.error);
+                    return;
+                }
+
+                document.getElementById('prediction').innerText = "Prediction: " + data.prediction;
+                document.getElementById('confidence').innerText = "Confidence: " + data.confidence;
+                document.getElementById('result_image').src = "data:image/jpeg;base64," + data.image_base64;
+
+            } catch (err) {
+                console.error(err);
                 alert("Error uploading image!");
-                return;
             }
-
-            const data = await response.json();
-            document.getElementById("resultImg").src = data.image_url;
-            document.getElementById("predictionText").innerText = 
-                `Prediction: ${data.prediction} (${data.confidence})`;
         }
     </script>
 </body>
