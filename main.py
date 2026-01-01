@@ -1,5 +1,8 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
+from fastapi import Request
 import torch, cv2, numpy as np
 from torchvision import transforms
 from PIL import Image
@@ -10,6 +13,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 224
 
 app = FastAPI(title="Fracture Detection API")
+
+templates = Jinja2Templates(directory="templates")
 
 model = get_model().to(DEVICE)
 model.load_state_dict(torch.load("models/fracture_model.pth", map_location=DEVICE))
@@ -50,6 +55,10 @@ transform = transforms.Compose([transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)), tra
 def get_strongest_point(cam):
     y, x = np.unravel_index(np.argmax(cam), cam.shape)
     return int(x), int(y)
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
