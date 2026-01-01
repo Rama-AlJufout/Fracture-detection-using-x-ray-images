@@ -2,38 +2,56 @@ from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 import os
 import shutil
+import uuid
+
 import torch
 import cv2
 import numpy as np
 from torchvision import transforms
 from PIL import Image
-from model import get_model
-import uuid
 
+from model import get_model
+
+# -----------------------
+# Config
+# -----------------------
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 224
 
-UPLOAD_DIR = "uploads"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "fracture_model.pth")
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# -----------------------
+# FastAPI App
+# -----------------------
 app = FastAPI(title="Fracture Detection API")
 
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-templates = Jinja2Templates(directory="templates")
-
+# -----------------------
+# Load Model
+# -----------------------
 model = get_model().to(DEVICE)
-model.load_state_dict(torch.load("models/fracture_model.pth", map_location=DEVICE))
+model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 model.eval()
 
-
+# -----------------------
+# Grad-CAM
+# -----------------------
 class GradCAM:
     def __init__(self, model, target_layer):
         self.model = model
         self.gradients = None
         self.activations = None
+
         target_layer.register_forward_hook(self.forward_hook)
         target_layer.register_full_backward_hook(self.backward_hook)
 
@@ -50,57 +68,78 @@ class GradCAM:
 
         grads = self.gradients[0].detach().cpu().numpy()
         acts = self.activations[0].detach().cpu().numpy()
+
         weights = np.mean(grads, axis=(1, 2))
         cam = np.zeros(acts.shape[1:], dtype=np.float32)
+
         for i, w in enumerate(weights):
             cam += w * acts[i]
+
         cam = np.maximum(cam, 0)
         cam = cv2.resize(cam, (IMAGE_SIZE, IMAGE_SIZE))
         cam = cam / (cam.max() + 1e-8)
+
         return cam
 
 
 cam_generator = GradCAM(model, model.layer4)
 
+# -----------------------
+# Image Transform
+# -----------------------
 transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
 ])
 
-
+# -----------------------
+# Utils
+# -----------------------
 def get_strongest_point(cam):
     y, x = np.unravel_index(np.argmax(cam), cam.shape)
     return int(x), int(y)
 
-
+# -----------------------
+# Routes
+# -----------------------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request}
+    )
 
 
 @app.post("/predict")
 def predict(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
-        return JSONResponse(status_code=400, content={"error": "Please upload an image"})
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Please upload a valid image"}
+        )
 
-    filename = f"result_{uuid.uuid4().hex}.jpg"
-    OUTPUT_IMAGE = os.path.join(UPLOAD_DIR, filename)
+    # Save uploaded image
+    input_filename = f"input_{uuid.uuid4().hex}.jpg"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
-    image_path = os.path.join(UPLOAD_DIR, file.filename)
-    with open(image_path, "wb") as buffer:
+    with open(input_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    pil_img = Image.open(image_path).convert("RGB")
+    # Preprocess
+    pil_img = Image.open(input_path).convert("RGB")
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
-    output = model(input_tensor)
-    class_idx = output.argmax(dim=1).item()
-    confidence = torch.softmax(output, dim=1)[0][class_idx].item()
-
-    img = cv2.imread(image_path)
-    img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
+    # Predict
+    with torch.no_grad():
+        output = model(input_tensor)
+        class_idx = output.argmax(dim=1).item()
+        confidence = torch.softmax(output, dim=1)[0][class_idx].item()
 
     label = "Fracture" if class_idx == 0 else "No Fracture"
+
+    # Load image for drawing
+    img = cv2.imread(input_path)
+    img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
 
     if class_idx == 0:
         cam = cam_generator.generate(input_tensor, class_idx)
@@ -118,10 +157,13 @@ def predict(file: UploadFile = File(...)):
             tipLength=0.25
         )
 
-    cv2.imwrite(OUTPUT_IMAGE, img)
+    # Save result
+    output_filename = f"result_{uuid.uuid4().hex}.jpg"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+    cv2.imwrite(output_path, img)
 
     return JSONResponse({
-        "image_url": f"/static/{filename}",
+        "image_url": f"/static/{output_filename}",
         "prediction": label,
-        "confidence": f"{confidence*100:.1f}%"
+        "confidence": f"{confidence * 100:.1f}%"
     })
